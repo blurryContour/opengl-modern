@@ -1,7 +1,6 @@
 #version 430
 
 in vec4 vertexPos;
-
 out vec4 fragColor;
 
 uniform vec2 resolution;

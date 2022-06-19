@@ -1,9 +1,13 @@
 import moderngl_window as mglw
-import numpy as np
+
+from convert import convert
+
+
+FRAGMENT_SHADER = 'fragment_raytrace.glsl'
 
 
 class App(mglw.WindowConfig):
-    width = 800
+    width = 1200
     height = int(width*9/16)
     window_size = (width, height)
     resource_dir = 'shaders'
@@ -13,8 +17,7 @@ class App(mglw.WindowConfig):
         self.quad = mglw.geometry.quad_fs()
         self.prog = self.load_program(
             vertex_shader='vertex.glsl',
-            # fragment_shader='fragment.glsl'
-            fragment_shader='fragment_lines.glsl'
+            fragment_shader=FRAGMENT_SHADER
         )
         self.set_uniform('resolution', self.window_size)
 
@@ -31,4 +34,8 @@ class App(mglw.WindowConfig):
 
 
 if __name__ == '__main__':
+    input_file  = 'shadertoy.glsl'
+    output_file = 'fragment_raytrace.glsl'
+    convert(input_file, output_file)
+
     mglw.run_window_config(App)
