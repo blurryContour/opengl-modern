@@ -1,3 +1,12 @@
+// Hey!
+// This is my implementation of raytracing including
+// different reflections and refractions techniques 
+// along with phong lighting model and shadows
+// There are still some bugs I think :o but 
+// I'll come to them a bit later!
+// Enjoy :)
+
+
 #define PI 3.1415926535
 #define SHADOWS
 
@@ -10,7 +19,7 @@ float ambientStrength = 0.1;
 const int R = 3;    // Num reflections
 const float delta = 10e-5;
 float shadowFactor = 0.1;
-const int N = 5;    // Num spheres
+const int N = 6;    // Num spheres
 bool transform = true;
 bool deg = false;
 float fov = 0.8;   // 0 < fov
@@ -23,7 +32,8 @@ struct Material{
     float kd;   // Diffuse factor
     float ks;   // Diffuse factor
     float kr;   // Reflectivity
-    float ki;   // Refractive index
+    float kt;   // Transmitivity
+    float n;    // Refractive index
 };
 
 struct Sphere{
@@ -49,6 +59,8 @@ struct Light{
 struct Ray{
     vec3 dir;
     vec3 origin;
+    float factor;   // color multiplier for ray
+    float n;    // index of medium ray in currently in
 };
 
 struct Hit{
@@ -95,7 +107,7 @@ mat3 Rotation(vec3 euler, bool deg){
 
 // Global variables
 Ray[totalRays+1] reflectionRays;
-Ray[totalRays] refractionRays;
+Ray[totalRays+1] refractionRays;
 Light light;
 Plane ground;
 Sphere[N] spheres;
@@ -155,7 +167,31 @@ vec4 GetLighting(in Material mat, in vec3 normal, in vec3 rayDir, in Light light
     return col;
 }
 
-vec4 RayTraceCore(in Ray ray, inout Material hitMat, inout Hit hit, in int iter){
+float Fresnel(float n1, float n2, vec3 normal, vec3 incident, float reflectivity){
+    // Schlick aproximation
+    float r0 = (n1-n2) / (n1+n2);
+    r0 *= r0;
+    float cosX = -dot(normal, incident);
+    if (n1 > n2)
+    {
+        float n = n1/n2;
+        float sinT2 = n*n*(1.0-cosX*cosX);
+        // Total internal reflection
+        if (sinT2 > 1.0)
+            return 1.0;
+        cosX = sqrt(1.0-sinT2);
+    }
+    float x = 1.0-cosX;
+    float ret = r0+(1.0-r0)*x*x*x*x*x;
+
+    // adjust reflect multiplier for object reflectivity
+    ret = (reflectivity + (1.0-reflectivity) * ret);
+    return ret;
+}
+
+
+vec4 RayTraceCore(inout Ray ray, inout Material hitMat, inout Hit hit, in int iter){
+    
     // Plane distance calculations
     Hit hitGround = RayCastPlane(ray.origin, ray.dir, ground, 0.0);
     // Sphere distance calculations
@@ -166,12 +202,8 @@ vec4 RayTraceCore(in Ray ray, inout Material hitMat, inout Hit hit, in int iter)
 
     // Finding closest object to camera
     vec4 col = vec4(0,0,0,0);
-    int hitObj = -1;
-    float reflectivity = 1.0;
-    
     // Minimum distance for ground plane
     if (hitGround.d > 0.0){
-        hitObj = 0;
         hit = hitGround;
         // sample ground texture
         vec2 groundTexScale = vec2(0.5);
@@ -179,12 +211,10 @@ vec4 RayTraceCore(in Ray ray, inout Material hitMat, inout Hit hit, in int iter)
         hitMat = ground.mat;
         col = GetLighting(ground.mat, hitGround.normal, ray.dir, light);
     }
-
     // Minimum distances for all spheres
     for (int i=0; i<N; i++){
         if (hitSphere[i].d < 0.0) hitSphere[i].d = FLOAT_MAX;
         if (hitSphere[i].d < hit.d){
-            hitObj = i+1;
             hit = hitSphere[i];
             hitMat = spheres[i].mat;
             col = GetLighting(spheres[i].mat, hitSphere[i].normal, ray.dir, light);
@@ -193,7 +223,7 @@ vec4 RayTraceCore(in Ray ray, inout Material hitMat, inout Hit hit, in int iter)
 
     // If no object hit then exit
     if (hit.d == FLOAT_MAX){
-        col = texture(iChannel0, ray.dir - 2.0 * hit.normal * dot(ray.dir, hit.normal));
+        col = texture(iChannel0, reflect(ray.dir, hit.normal));
         return col;
     }
 
@@ -223,9 +253,9 @@ vec4 RayTraceCore(in Ray ray, inout Material hitMat, inout Hit hit, in int iter)
     return col;
 }
 
-vec4 CastRays(int iter){
+
+vec4 CastRays(in int iter){
     
-    // ------- REFLECTION PART -------
     int startIdx = 0;
     if (iter != 0)
         startIdx = 1;
@@ -234,80 +264,107 @@ vec4 CastRays(int iter){
     int endIdx = 1;
     for(int i=0;i<iter;i++)
         endIdx *= 2;
+    
+    vec4 currLevelCol = vec4(0);
 
+    // ------- REFLECTION PART -------
     // For each new reflection ray
     int j = 0;  // new ray counter
-    vec4 finalCol = vec4(0);
     for (int r=startIdx; r<endIdx; r++){
+        // Incident ray
         Ray ray = reflectionRays[r];
-        if (ray.origin == vec3(0) && ray.dir == vec3(0))
-            // Rays donot exist
+        if (ray.dir == vec3(0) || ray.factor==0.0){
+            // Rays that don't exist
+            j += 1;
             continue;
+        }
 
-        Hit hit = Hit(FLOAT_MAX, vec3(0), vec3(0));;
+        Hit hit = Hit(FLOAT_MAX, vec3(0), vec3(0));
         Material hitMat;
+        // Get color of ray
         vec4 col = RayTraceCore(ray, hitMat, hit, iter);
+        currLevelCol += col * ray.factor;
+
+        float n1, n2;
+        if (ray.n != 1.0){
+            n1 = ray.n;
+            n2 = 1.0;
+            hit.normal *= -1.0;
+        } 
+        else {
+            n1 = 1.0;
+            n2 = hitMat.n;
+        }
+        float Kr = Fresnel(n1, n2, hit.normal, ray.dir, hitMat.kr);
         
         // Add new reflection & refraction ray
         if (hit.d < FLOAT_MAX && hit.d > 0.0){
             // Add new reflection ray
-            reflectionRays[endIdx+j].origin = hit.point + delta*hit.normal;
+            reflectionRays[endIdx+j].origin = hit.point + delta * hit.normal;
             reflectionRays[endIdx+j].dir = reflect(ray.dir, hit.normal);
+            reflectionRays[endIdx+j].factor = ray.factor * Kr;
+            reflectionRays[endIdx+j].n = n1;
             // Add new refraction ray
-            if (hitMat.ki > 0.0){
-                refractionRays[endIdx+j].origin = hit.point - delta*hit.normal;
-                refractionRays[endIdx+j].dir = refract(ray.dir, hit.normal, 1.0/hitMat.ki);
+            if (hitMat.kt > 0.0){
+                refractionRays[endIdx+j].origin = hit.point - delta * hit.normal;
+                refractionRays[endIdx+j].factor = ray.factor * (1.0-Kr);
+                refractionRays[endIdx+j].n = n2;
+                refractionRays[endIdx+j].dir = refract(ray.dir, hit.normal, n1/n2);
             }
         }
         j += 1;
-
-        if (iter != 0)
-            finalCol += col * hitMat.kr;
-        else
-            finalCol += col;
     }
 
 
     // ------- REFRACTION PART -------
-    startIdx = 1;
-    for(int i=0;i<iter;i++)
-        startIdx *= 2;
-    startIdx -= 1;
-    endIdx = 1;
-    for(int i=0;i<iter+1;i++)
-        endIdx *= 2;
-    endIdx -= 1;
-
     // For each new refraction ray
-    // finalCol = vec3(0);
     for (int r=startIdx; r<endIdx; r++){
         Ray ray = refractionRays[r];
-        if (ray.origin == vec3(0) && ray.dir == vec3(0))
-            // Rays donot exist
+        if (ray.dir == vec3(0) || ray.factor==0.0){
+            // Rays that don't exist
+            j += 1;
             continue;
+        }
 
-        Hit hit = Hit(FLOAT_MAX, vec3(0), vec3(0));;
+        Hit hit = Hit(FLOAT_MAX, vec3(0), vec3(0));
         Material hitMat;
+        // Get color of ray
         vec4 col = RayTraceCore(ray, hitMat, hit, iter);
+        currLevelCol += col * ray.factor;
 
+        float n1, n2;
+        if (ray.n != 1.0){
+            n1 = ray.n;
+            n2 = 1.0;
+            hit.normal *= -1.0;
+        }
+        else {
+            n1 = 1.0;
+            n2 = hitMat.n;
+        }
+        float Kr = Fresnel(n1, n2, hit.normal, ray.dir, hitMat.kr);
+        
         // Add new reflection & refraction ray
         if (hit.d < FLOAT_MAX && hit.d > 0.0){
             // Add new reflection ray
-            reflectionRays[endIdx+j].origin = hit.point - delta*hit.normal;
+            reflectionRays[endIdx+j].origin = hit.point + delta * hit.normal;
             reflectionRays[endIdx+j].dir = reflect(ray.dir, hit.normal);
+            reflectionRays[endIdx+j].factor = ray.factor * Kr;
+            reflectionRays[endIdx+j].n = n1;
             // Add new refraction ray
-            if (hitMat.ki > 0.0){
-                refractionRays[endIdx+j].origin = hit.point + delta*hit.normal;
-                refractionRays[endIdx+j].dir = refract(ray.dir, hit.normal, hitMat.ki);
+            if (hitMat.kt > 0.0){
+                refractionRays[endIdx+j].origin = hit.point - delta * hit.normal;
+                refractionRays[endIdx+j].factor = ray.factor * (1.0-Kr);
+                refractionRays[endIdx+j].n = n2;
+                refractionRays[endIdx+j].dir = refract(ray.dir, hit.normal, n1/n2);
             }
         }
         j += 1;
-
-        finalCol += col;
     }
 
-    return finalCol;
+    return currLevelCol;
 }
+
 
 //--------- Main Function ---------
 void mainImage( out vec4 fragColor, in vec2 fragCoord )
@@ -333,29 +390,33 @@ void mainImage( out vec4 fragColor, in vec2 fragCoord )
     ground.center = vec3(camOffset.x,0,camOffset.z);
     ground.size = vec3(5,0,5);
     ground.normal = vec3(0,1,0);
-    ground.mat = Material(vec4(0.3,0.8,0.2,1.0), 1.0, 16.0, 0.2, -1.0);
+    ground.mat = Material(vec4(0.3,0.8,0.2,1.0), 1.0, 16.0, 0.2, 0.0, 1.0);
     
     // Ground plane
-    spheres[0].radius = 1.0;
-    spheres[0].center = vec3(-0.8,1,4);
-    spheres[0].mat = Material(vec4(1.0,0.1,0.1,1.0), 1.0, 16.0, 0.5, -1.0);
-    
-    spheres[1].radius = 1.5;
-    spheres[1].center = vec3(1.0,1.5,6);
-    spheres[1].mat = Material(vec4(0.3,0.3,1.0,1.0), 1.0, 16.0, 0.1, -1.0);
+    spheres[0].radius = 0.8;
+    spheres[0].center = vec3(0.0,0.8,2);
+    spheres[0].mat = Material(vec4(0,0,0,0.0), 1.0, 32.0, 0.1, 1.0, 1.25);
+
+    spheres[1].radius = 1.1;
+    spheres[1].center = vec3(1.0,1.1,6);
+    spheres[1].mat = Material(vec4(0.3,0.3,1.0,1.0), 1.0, 16.0, 0.1, 0.0, 2.0);
     
     spheres[2].radius = 0.5;
     spheres[2].center = vec3(-2.0,0.5,3.0);
-    spheres[2].mat = Material(vec4(0.8,0.8,0.1,1.0), 1.0, 32.0, 1.0, -1.0);
+    spheres[2].mat = Material(vec4(0.8,0.8,0.1,1.0), 1.0, 32.0, 1.0, 0.0, 2.0);
     
     spheres[3].radius = 0.5;
     spheres[3].center = vec3(1.5,0.8,3);
-    spheres[3].mat = Material(vec4(0.0,1.0,1.0,1.0), 1.0, 0.0001, 0.0, -1.0);
+    spheres[3].mat = Material(vec4(0.0,1.0,1.0,1.0), 1.0, 0.0001, 0.0, 0.0, 2.0);
 
-    spheres[4].radius = 0.5;
-    spheres[4].center = vec3(0.0,0.8,2);
-    spheres[4].mat = Material(vec4(0,0,0,0.0), 1.0, 32.0, 0.5, 1.5);
-
+    spheres[4].radius = 1.0;
+    spheres[4].center = vec3(-0.8,1,4);
+    spheres[4].mat = Material(vec4(1.0,0.1,0.1,1.0), 1.0, 16.0, 0.5, 0.0, 2.0);
+    
+    spheres[5].radius = 1.0;
+    spheres[5].center = vec3(-2.0,1.0,7);
+    spheres[5].mat = Material(vec4(0,0,0,0.0), 1.0, 32.0, 0.1, 1.0, 1.5);
+    
     //------------------------------------------------------------//
     
     // CALCULATIONS BEGIN
@@ -367,7 +428,9 @@ void mainImage( out vec4 fragColor, in vec2 fragCoord )
     
     // View ray
     ray.dir = normalize(vec3(cameraPos.x+uv.x, cameraPos.y+uv.y, 0) - cameraPos);
-    
+    ray.factor = 1.0;
+    ray.n = 1.0;    // Starts in air
+
     // Translate & Rotate camera
     camAngle = mod(camAngle, 2.0*PI);
     vec3 rotate = vec3(-0.2, camAngle, 0);
@@ -381,9 +444,9 @@ void mainImage( out vec4 fragColor, in vec2 fragCoord )
     ray.origin = translate;
     
     // Start recurive raytracing
-    for (int i=0; i<totalRays; i++){
-        reflectionRays[i+1] = Ray(vec3(0), vec3(0));
-        refractionRays[i] = Ray(vec3(0), vec3(0));
+    for (int i=0; i<totalRays+1; i++){
+        reflectionRays[i] = Ray(vec3(0), vec3(0), 0.0, 0.0);
+        refractionRays[i] = Ray(vec3(0), vec3(0), 0.0, 0.0);
     }
     reflectionRays[0] = ray;
     vec4 finalCol = vec4(0);
